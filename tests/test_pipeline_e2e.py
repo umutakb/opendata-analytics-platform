@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import date
 from pathlib import Path
 
 import duckdb
 
-from opendata_platform.config import load_config
 from opendata_platform.ingest.generate_data import generate_synthetic_data
-from opendata_platform.metrics.metric_runner import run_metrics
-from opendata_platform.quality.dq_checks import run_quality_checks
-from opendata_platform.quality.report import write_quality_report
 from opendata_platform.transform.run_sql import run_transforms
 from opendata_platform.warehouse.build_db import build_warehouse
 
@@ -17,13 +16,39 @@ from opendata_platform.warehouse.build_db import build_warehouse
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _run_cli(tmp_path: Path, cli_args: list[str]) -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    subprocess.run(
+        [sys.executable, "-m", "opendata_platform.cli", *cli_args],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+
+def _find_artifact_file(artifacts_root: Path, artifact_type: str, file_name: str) -> Path:
+    latest_path = artifacts_root / "latest" / artifact_type / file_name
+    if latest_path.exists():
+        return latest_path
+
+    run_candidates = sorted((artifacts_root / "runs").glob(f"*/{artifact_type}/{file_name}"))
+    if run_candidates:
+        return run_candidates[-1]
+
+    direct_path = artifacts_root / artifact_type / file_name
+    if direct_path.exists():
+        return direct_path
+
+    raise AssertionError(f"Artifact file not found: {artifact_type}/{file_name}")
+
+
 def test_pipeline_e2e(tmp_path: Path) -> None:
     raw_dir = tmp_path / "data" / "raw"
     staging_dir = tmp_path / "data" / "staging"
     marts_dir = tmp_path / "data" / "marts"
-    metrics_dir = tmp_path / "artifacts" / "metrics"
-    quality_dir = tmp_path / "artifacts" / "quality"
     db_path = tmp_path / "data" / "warehouse.duckdb"
+    artifacts_root = tmp_path / "artifacts"
 
     stats = generate_synthetic_data(
         out_dir=raw_dir,
@@ -48,25 +73,38 @@ def test_pipeline_e2e(tmp_path: Path) -> None:
     assert transform_stats["staging_exports"] >= 4
     assert transform_stats["marts_exports"] >= 4
 
-    manifest = run_metrics(
-        db_path=db_path,
-        sql_dir=PROJECT_ROOT / "sql" / "metrics",
-        out_dir=metrics_dir,
-        eval_days=90,
+    _run_cli(
+        tmp_path,
+        [
+            "metrics",
+            "--db",
+            str(db_path),
+            "--sql-root",
+            str(PROJECT_ROOT / "sql"),
+            "--config",
+            str(PROJECT_ROOT / "config.example.yml"),
+        ],
     )
-    assert len(manifest) >= 5
-
-    config = load_config(PROJECT_ROOT / "config.example.yml")
-    quality_report = run_quality_checks(db_path, config)
-    json_path, html_path = write_quality_report(quality_report, quality_dir)
+    _run_cli(
+        tmp_path,
+        [
+            "quality",
+            "--db",
+            str(db_path),
+            "--config",
+            str(PROJECT_ROOT / "config.example.yml"),
+        ],
+    )
 
     assert (raw_dir / "orders.csv").exists()
     assert (staging_dir / "stg_orders.csv").exists()
     assert (marts_dir / "fct_orders.csv").exists()
-    assert (metrics_dir / "m_gmv_daily.csv").exists()
-    assert (metrics_dir / "m_retention_cohort.json").exists()
-    assert json_path.exists()
-    assert html_path.exists()
+    assert _find_artifact_file(artifacts_root, "metrics", "m_gmv_daily.csv").exists()
+    assert _find_artifact_file(artifacts_root, "metrics", "m_net_gmv_daily.csv").exists()
+    assert _find_artifact_file(artifacts_root, "metrics", "m_retention_cohort.json").exists()
+    assert _find_artifact_file(artifacts_root, "quality", "report.json").exists()
+    assert _find_artifact_file(artifacts_root, "quality", "report.html").exists()
+    assert (artifacts_root / "latest_run.txt").exists()
 
     with duckdb.connect(str(db_path)) as conn:
         relations = {

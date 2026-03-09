@@ -38,9 +38,23 @@ def _resolve_quality_report_path(db_path: str, quality_report_arg: str | None) -
         return Path(quality_report_arg)
 
     db_file = Path(db_path)
-    if db_file.parent.name == "data":
-        return db_file.parent.parent / "artifacts" / "quality" / "report.json"
-    return Path("artifacts/quality/report.json")
+    project_root = db_file.parent.parent if db_file.parent.name == "data" else Path(".")
+    artifacts_root = project_root / "artifacts"
+
+    latest_quality_report = artifacts_root / "latest" / "quality" / "report.json"
+    if latest_quality_report.exists():
+        return latest_quality_report
+
+    latest_run_pointer = artifacts_root / "latest_run.txt"
+    if latest_run_pointer.exists():
+        run_path = Path(latest_run_pointer.read_text(encoding="utf-8").strip())
+        if not run_path.is_absolute():
+            run_path = (project_root / run_path).resolve()
+        run_quality_report = run_path / "quality" / "report.json"
+        if run_quality_report.exists():
+            return run_quality_report
+
+    return artifacts_root / "quality" / "report.json"
 
 
 def _format_range(min_date: Any, max_date: Any) -> str:
