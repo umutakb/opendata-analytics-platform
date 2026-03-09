@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-03-09
+### Added
+- `opdata run-all` command for end-to-end execution
+- Config-driven metric selection via `metrics.enabled`
+- Run manifests and per-run logs under `artifacts/runs/<timestamp>/`
+- CI E2E flow coverage using `run-all --small`
+
 ## [1.1.0] - 2026-03-09
 ### Added
 - Dashboard filters: date range, country, category
