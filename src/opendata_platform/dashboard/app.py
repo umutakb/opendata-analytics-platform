@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 @st.cache_data(show_spinner=False)
-def _run_query(db_path: str, query: str) -> pd.DataFrame:
+def _run_query(db_path: str, query: str, params: list[Any] | None = None) -> pd.DataFrame:
     with duckdb.connect(db_path, read_only=True) as conn:
+        if params:
+            return conn.execute(query, params).df()
         return conn.execute(query).df()
 
 
@@ -41,9 +44,175 @@ def _resolve_quality_report_path(db_path: str, quality_report_arg: str | None) -
 
 
 def _format_range(min_date: Any, max_date: Any) -> str:
-    if min_date is None or max_date is None:
+    if min_date is None or max_date is None or pd.isna(min_date) or pd.isna(max_date):
         return "Date range: N/A"
-    return f"Date range: {min_date} to {max_date}"
+    min_value = pd.to_datetime(min_date).date().isoformat()
+    max_value = pd.to_datetime(max_date).date().isoformat()
+    return f"Date range: {min_value} to {max_value}"
+
+
+def _resolve_default_date_range(db_path: str) -> tuple[date, date]:
+    date_bounds = _run_query(
+        db_path,
+        """
+        SELECT
+          MIN(order_date) AS min_date,
+          MAX(order_date) AS max_date
+        FROM fct_orders
+        WHERE order_status = 'paid';
+        """,
+    )
+    min_date = date_bounds.iloc[0]["min_date"]
+    max_date = date_bounds.iloc[0]["max_date"]
+
+    if min_date is None or max_date is None or pd.isna(min_date) or pd.isna(max_date):
+        today = date.today()
+        return today, today
+
+    return pd.to_datetime(min_date).date(), pd.to_datetime(max_date).date()
+
+
+def _load_filter_options(db_path: str) -> tuple[list[str], list[str]]:
+    countries_df = _run_query(
+        db_path,
+        """
+        SELECT DISTINCT c.country
+        FROM fct_orders o
+        JOIN dim_customers c ON o.customer_id = c.customer_id
+        WHERE o.order_status = 'paid'
+        ORDER BY 1;
+        """,
+    )
+    categories_df = _run_query(
+        db_path,
+        """
+        SELECT DISTINCT p.category
+        FROM fct_orders o
+        JOIN fct_order_items oi ON o.order_id = oi.order_id
+        JOIN dim_products p ON oi.product_id = p.product_id
+        WHERE o.order_status = 'paid'
+        ORDER BY 1;
+        """,
+    )
+
+    countries = [str(v) for v in countries_df["country"].dropna().tolist()]
+    categories = [str(v) for v in categories_df["category"].dropna().tolist()]
+    return countries, categories
+
+
+def _read_dashboard_filters(db_path: str) -> dict[str, Any]:
+    default_start, default_end = _resolve_default_date_range(db_path)
+    country_options, category_options = _load_filter_options(db_path)
+
+    st.sidebar.header("Filters")
+    selected_dates = st.sidebar.date_input(
+        "Date range",
+        value=(default_start, default_end),
+        min_value=default_start,
+        max_value=default_end,
+    )
+    if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+        start_date, end_date = selected_dates
+    else:
+        start_date = end_date = selected_dates
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    selected_countries = st.sidebar.multiselect("Country", options=country_options, default=[])
+    selected_categories = st.sidebar.multiselect("Category", options=category_options, default=[])
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "countries": selected_countries,
+        "categories": selected_categories,
+    }
+
+
+def _build_order_where_clause(filters: dict[str, Any], order_alias: str = "o", customer_alias: str = "c") -> tuple[str, list[Any]]:
+    clauses = [
+        f"{order_alias}.order_status = 'paid'",
+        f"{order_alias}.order_date BETWEEN ? AND ?",
+    ]
+    params: list[Any] = [filters["start_date"], filters["end_date"]]
+
+    countries = filters.get("countries", [])
+    if countries:
+        placeholders = ", ".join(["?"] * len(countries))
+        clauses.append(f"{customer_alias}.country IN ({placeholders})")
+        params.extend(countries)
+
+    categories = filters.get("categories", [])
+    if categories:
+        placeholders = ", ".join(["?"] * len(categories))
+        clauses.append(
+            "EXISTS ("
+            "SELECT 1 FROM fct_order_items oi_filter "
+            "JOIN dim_products p_filter ON oi_filter.product_id = p_filter.product_id "
+            f"WHERE oi_filter.order_id = {order_alias}.order_id AND p_filter.category IN ({placeholders})"
+            ")"
+        )
+        params.extend(categories)
+
+    return " AND ".join(clauses), params
+
+
+def _build_top_category_where_clause(
+    filters: dict[str, Any],
+    order_alias: str = "o",
+    customer_alias: str = "c",
+    category_alias: str = "p",
+) -> tuple[str, list[Any]]:
+    clauses = [
+        f"{order_alias}.order_status = 'paid'",
+        f"{order_alias}.order_date BETWEEN ? AND ?",
+    ]
+    params: list[Any] = [filters["start_date"], filters["end_date"]]
+
+    countries = filters.get("countries", [])
+    if countries:
+        placeholders = ", ".join(["?"] * len(countries))
+        clauses.append(f"{customer_alias}.country IN ({placeholders})")
+        params.extend(countries)
+
+    categories = filters.get("categories", [])
+    if categories:
+        placeholders = ", ".join(["?"] * len(categories))
+        clauses.append(f"{category_alias}.category IN ({placeholders})")
+        params.extend(categories)
+
+    return " AND ".join(clauses), params
+
+
+def _compute_kpis(ts_df: pd.DataFrame) -> dict[str, Any]:
+    if ts_df.empty:
+        return {
+            "gmv_30d": 0.0,
+            "orders_30d": 0,
+            "gmv_90d": 0.0,
+            "orders_90d": 0,
+            "range_30d": "Date range: N/A",
+            "range_90d": "Date range: N/A",
+        }
+
+    work = ts_df.copy()
+    work["metric_date"] = pd.to_datetime(work["metric_date"])
+    reference_date = work["metric_date"].max().date()
+
+    start_30d = reference_date - timedelta(days=29)
+    start_90d = reference_date - timedelta(days=89)
+
+    w30 = work.loc[work["metric_date"].dt.date >= start_30d]
+    w90 = work.loc[work["metric_date"].dt.date >= start_90d]
+
+    return {
+        "gmv_30d": float(w30["gmv"].sum()),
+        "orders_30d": int(w30["orders"].sum()),
+        "gmv_90d": float(w90["gmv"].sum()),
+        "orders_90d": int(w90["orders"].sum()),
+        "range_30d": _format_range(w30["metric_date"].min(), w30["metric_date"].max()),
+        "range_90d": _format_range(w90["metric_date"].min(), w90["metric_date"].max()),
+    }
 
 
 def _build_chart_df(ts_df: pd.DataFrame, value_col: str, ma_col: str) -> pd.DataFrame:
@@ -118,33 +287,32 @@ def main() -> None:
     quality_report_path = _resolve_quality_report_path(args.db, args.quality_report)
 
     st.set_page_config(page_title="OpenData Analytics Platform", layout="wide")
+    filters = _read_dashboard_filters(args.db)
     st.title("OpenData Analytics Platform Dashboard")
     st.caption(f"Warehouse: {args.db}")
-
-    kpi_sql = """
-    WITH paid_orders AS (
-      SELECT order_date, order_amount_from_items
-      FROM fct_orders
-      WHERE order_status = 'paid'
-    )
+    order_where_clause, order_where_params = _build_order_where_clause(filters)
+    ts_sql = f"""
     SELECT
-      ROUND(SUM(CASE WHEN order_date >= current_date - INTERVAL 30 DAY THEN order_amount_from_items ELSE 0 END), 2) AS gmv_30d,
-      COUNT(CASE WHEN order_date >= current_date - INTERVAL 30 DAY THEN 1 ELSE NULL END) AS orders_30d,
-      ROUND(SUM(CASE WHEN order_date >= current_date - INTERVAL 90 DAY THEN order_amount_from_items ELSE 0 END), 2) AS gmv_90d,
-      COUNT(CASE WHEN order_date >= current_date - INTERVAL 90 DAY THEN 1 ELSE NULL END) AS orders_90d,
-      MIN(CASE WHEN order_date >= current_date - INTERVAL 30 DAY THEN order_date END) AS min_date_30d,
-      MAX(CASE WHEN order_date >= current_date - INTERVAL 30 DAY THEN order_date END) AS max_date_30d,
-      MIN(CASE WHEN order_date >= current_date - INTERVAL 90 DAY THEN order_date END) AS min_date_90d,
-      MAX(CASE WHEN order_date >= current_date - INTERVAL 90 DAY THEN order_date END) AS max_date_90d
-    FROM paid_orders;
+      o.order_date AS metric_date,
+      ROUND(SUM(o.order_amount_from_items), 2) AS gmv,
+      COUNT(*) AS orders
+    FROM fct_orders o
+    JOIN dim_customers c ON o.customer_id = c.customer_id
+    WHERE {order_where_clause}
+    GROUP BY 1
+    ORDER BY 1;
     """
-    kpi_df = _run_query(args.db, kpi_sql)
-    gmv_30d = float(kpi_df.iloc[0]["gmv_30d"] or 0)
-    orders_30d = int(kpi_df.iloc[0]["orders_30d"] or 0)
-    gmv_90d = float(kpi_df.iloc[0]["gmv_90d"] or 0)
-    orders_90d = int(kpi_df.iloc[0]["orders_90d"] or 0)
-    range_30d = _format_range(kpi_df.iloc[0]["min_date_30d"], kpi_df.iloc[0]["max_date_30d"])
-    range_90d = _format_range(kpi_df.iloc[0]["min_date_90d"], kpi_df.iloc[0]["max_date_90d"])
+    ts_df = _run_query(args.db, ts_sql, order_where_params)
+    if not ts_df.empty:
+        ts_df["metric_date"] = pd.to_datetime(ts_df["metric_date"])
+
+    kpi_values = _compute_kpis(ts_df)
+    gmv_30d = kpi_values["gmv_30d"]
+    orders_30d = kpi_values["orders_30d"]
+    gmv_90d = kpi_values["gmv_90d"]
+    orders_90d = kpi_values["orders_90d"]
+    range_30d = kpi_values["range_30d"]
+    range_90d = kpi_values["range_90d"]
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("GMV (30d)", f"{gmv_30d:,.2f}")
@@ -155,43 +323,42 @@ def main() -> None:
     st.caption(f"30d window: {range_30d}")
     st.caption(f"90d window: {range_90d}")
 
-    ts_sql = """
-    SELECT
-      order_date AS metric_date,
-      ROUND(SUM(order_amount_from_items), 2) AS gmv,
-      COUNT(*) AS orders
-    FROM fct_orders
-    WHERE order_status = 'paid'
-    GROUP BY 1
-    ORDER BY 1;
-    """
-    ts_df = _run_query(args.db, ts_sql)
-    ts_df["metric_date"] = pd.to_datetime(ts_df["metric_date"])
     gmv_chart_df = _build_chart_df(ts_df, "gmv", "gmv_ma7")
     orders_chart_df = _build_chart_df(ts_df, "orders", "orders_ma7")
 
     left, right = st.columns(2)
     left.subheader("Daily GMV")
-    left.line_chart(gmv_chart_df)
+    if gmv_chart_df.empty:
+        left.info("No data for selected filters.")
+    else:
+        left.line_chart(gmv_chart_df)
 
     right.subheader("Daily Orders")
-    right.line_chart(orders_chart_df)
+    if orders_chart_df.empty:
+        right.info("No data for selected filters.")
+    else:
+        right.line_chart(orders_chart_df)
 
-    top_categories_sql = """
+    top_categories_where_clause, top_categories_params = _build_top_category_where_clause(filters)
+    top_categories_sql = f"""
     SELECT
       p.category,
       ROUND(SUM(oi.item_total), 2) AS gmv
     FROM fct_order_items oi
     JOIN fct_orders o ON oi.order_id = o.order_id
     JOIN dim_products p ON oi.product_id = p.product_id
-    WHERE o.order_status = 'paid'
+    JOIN dim_customers c ON o.customer_id = c.customer_id
+    WHERE {top_categories_where_clause}
     GROUP BY 1
     ORDER BY 2 DESC
     LIMIT 10;
     """
-    cat_df = _run_query(args.db, top_categories_sql)
+    cat_df = _run_query(args.db, top_categories_sql, top_categories_params)
     st.subheader("Top Categories by GMV")
-    st.bar_chart(cat_df.set_index("category")["gmv"])
+    if cat_df.empty:
+        st.info("No category data for selected filters.")
+    else:
+        st.bar_chart(cat_df.set_index("category")["gmv"])
 
     retention_sql = """
     WITH paid_orders AS (
