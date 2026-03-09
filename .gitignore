@@ -1,0 +1,31 @@
+# OS / editor
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Local warehouse files
+data/*.duckdb
+
+# Generated raw/staging/marts outputs
+data/raw/*.csv
+data/staging/*.csv
+data/marts/*.csv
+
+# Generated metric and quality artifacts
+artifacts/metrics/*.csv
+artifacts/metrics/*.json
+artifacts/quality/report.json
+artifacts/quality/report.html
+artifacts/logs/*.log

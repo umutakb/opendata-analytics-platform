@@ -1,0 +1,19 @@
+version: 1
+warehouse:
+  db_path: "data/warehouse.duckdb"
+quality:
+  null_rate_thresholds:
+    customers.email: {warn: 0.01, fail: 0.03}
+    orders.status: {warn: 0.00, fail: 0.01}
+  pk_uniqueness:
+    - customers.customer_id
+    - products.product_id
+    - orders.order_id
+  ranges:
+    orders.total_amount: {min: 0, max: 200000, severity: "fail"}
+    order_items.quantity: {min: 1, max: 50, severity: "fail"}
+    order_items.unit_price: {min: 0.01, max: 50000, severity: "fail"}
+  freshness:
+    orders.order_date_max_age_days: {warn: 7, fail: 30}
+metrics:
+  eval_days: 90

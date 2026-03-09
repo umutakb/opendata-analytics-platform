@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opendata-analytics-platform"
+version = "0.1.0"
+description = "Mini modern data stack for e-commerce analytics with DuckDB"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "OpenData Analytics Team" }
+]
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "duckdb>=1.0",
+  "pyyaml>=6.0",
+  "streamlit>=1.35"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+
+[project.scripts]
+opdata = "opendata_platform.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
