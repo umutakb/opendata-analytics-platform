@@ -29,3 +29,6 @@ artifacts/metrics/*.json
 artifacts/quality/report.json
 artifacts/quality/report.html
 artifacts/logs/*.log
+artifacts/runs/
+artifacts/latest/
+artifacts/latest_run.txt

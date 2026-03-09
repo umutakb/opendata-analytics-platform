@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import shlex
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -48,6 +51,29 @@ def _sync_latest_artifacts(source_dir: Path, artifact_type: str, run_root: Path)
     shutil.copytree(source_dir, latest_target)
 
     (artifacts_root / "latest_run.txt").write_text(str(run_root), encoding="utf-8")
+
+
+def _build_run_logger(logs_dir: Path, run_id: str) -> logging.Logger:
+    logger = logging.getLogger(f"opdata.run_all.{run_id}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    log_file = logs_dir / "run.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(file_handler)
+    return logger
+
+
+def _close_logger(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        handler.flush()
+        handler.close()
+        logger.removeHandler(handler)
 
 
 def cmd_demo_data(args: argparse.Namespace) -> int:
@@ -141,47 +167,102 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     logs_out = run_root / "logs"
     logs_out.mkdir(parents=True, exist_ok=True)
 
-    if args.generate_data:
-        days = args.days if args.days is not None else (60 if args.small else 365)
-        orders = args.orders if args.orders is not None else (3000 if args.small else None)
-        customers = args.customers if args.customers is not None else (1200 if args.small else None)
-        products = args.products if args.products is not None else (250 if args.small else 1200)
-        data_stats = generate_synthetic_data(
-            out_dir=args.raw,
-            seed=args.seed,
-            days=days,
-            n_orders=orders,
-            n_customers=customers,
-            n_products=products,
-            end_date=args.end_date,
+    started_at = datetime.now()
+    step_durations: dict[str, float] = {}
+    metrics_manifest: list[dict] = []
+    quality_report: dict = {}
+    quality_json = quality_out / "report.json"
+    quality_html = quality_out / "report.html"
+    logger = _build_run_logger(logs_out, run_id)
+    logger.info("run-all started run_id=%s db_path=%s config_path=%s", run_id, args.db, args.config)
+
+    try:
+        if args.generate_data:
+            days = args.days if args.days is not None else (60 if args.small else 365)
+            orders = args.orders if args.orders is not None else (3000 if args.small else None)
+            customers = args.customers if args.customers is not None else (1200 if args.small else None)
+            products = args.products if args.products is not None else (250 if args.small else 1200)
+
+            start = time.perf_counter()
+            data_stats = generate_synthetic_data(
+                out_dir=args.raw,
+                seed=args.seed,
+                days=days,
+                n_orders=orders,
+                n_customers=customers,
+                n_products=products,
+                end_date=args.end_date,
+            )
+            step_durations["demo_data"] = round(time.perf_counter() - start, 3)
+            logger.info("step=demo_data duration_sec=%.3f details=%s", step_durations["demo_data"], data_stats)
+            print(f"[run-all] demo-data: {data_stats}")
+        else:
+            logger.info("step=demo_data skipped generate_data=false")
+
+        start = time.perf_counter()
+        warehouse_stats = build_warehouse(args.raw, args.db)
+        step_durations["build_warehouse"] = round(time.perf_counter() - start, 3)
+        logger.info(
+            "step=build_warehouse duration_sec=%.3f details=%s",
+            step_durations["build_warehouse"],
+            warehouse_stats,
         )
-        print(f"[run-all] demo-data: {data_stats}")
+        print(f"[run-all] build-warehouse: {warehouse_stats}")
 
-    warehouse_stats = build_warehouse(args.raw, args.db)
-    print(f"[run-all] build-warehouse: {warehouse_stats}")
+        start = time.perf_counter()
+        transform_stats = run_transforms(
+            db_path=args.db,
+            sql_root=args.sql_root,
+            staging_out=args.staging_out,
+            marts_out=args.marts_out,
+        )
+        step_durations["transform"] = round(time.perf_counter() - start, 3)
+        logger.info("step=transform duration_sec=%.3f details=%s", step_durations["transform"], transform_stats)
+        print(f"[run-all] transform: {transform_stats}")
 
-    transform_stats = run_transforms(
-        db_path=args.db,
-        sql_root=args.sql_root,
-        staging_out=args.staging_out,
-        marts_out=args.marts_out,
-    )
-    print(f"[run-all] transform: {transform_stats}")
+        eval_days = get_config_value(config, ["metrics", "eval_days"], None)
+        enabled_metrics = _parse_enabled_metrics(config)
+        start = time.perf_counter()
+        metrics_manifest = run_metrics(
+            db_path=args.db,
+            sql_dir=Path(args.sql_root) / "metrics",
+            out_dir=metrics_out,
+            eval_days=int(eval_days) if eval_days is not None else None,
+            enabled_metrics=enabled_metrics,
+        )
+        step_durations["metrics"] = round(time.perf_counter() - start, 3)
+        logger.info(
+            "step=metrics duration_sec=%.3f metrics=%s",
+            step_durations["metrics"],
+            [item["metric"] for item in metrics_manifest],
+        )
+        print(f"[run-all] metrics: {len(metrics_manifest)} files")
 
-    eval_days = get_config_value(config, ["metrics", "eval_days"], None)
-    enabled_metrics = _parse_enabled_metrics(config)
-    metrics_manifest = run_metrics(
-        db_path=args.db,
-        sql_dir=Path(args.sql_root) / "metrics",
-        out_dir=metrics_out,
-        eval_days=int(eval_days) if eval_days is not None else None,
-        enabled_metrics=enabled_metrics,
-    )
-    print(f"[run-all] metrics: {len(metrics_manifest)} files")
+        start = time.perf_counter()
+        quality_report = run_quality_checks(args.db, config)
+        quality_json, quality_html = write_quality_report(quality_report, quality_out)
+        step_durations["quality"] = round(time.perf_counter() - start, 3)
+        logger.info("step=quality duration_sec=%.3f summary=%s", step_durations["quality"], quality_report["summary"])
+        print(f"[run-all] quality: {quality_report['summary']}")
 
-    quality_report = run_quality_checks(args.db, config)
-    quality_json, quality_html = write_quality_report(quality_report, quality_out)
-    print(f"[run-all] quality: {quality_report['summary']}")
+        finished_at = datetime.now()
+        run_manifest = {
+            "run_id": run_id,
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "finished_at": finished_at.isoformat(timespec="seconds"),
+            "durations_sec": step_durations,
+            "db_path": str(args.db),
+            "config_path": str(args.config) if args.config else None,
+            "metrics_run": [item["metric"] for item in metrics_manifest],
+            "quality_summary": quality_report.get("summary", {}),
+        }
+        manifest_path = run_root / "run_manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(run_manifest, indent=2), encoding="utf-8")
+        logger.info("run_manifest=%s", manifest_path)
+        logger.info("run-all finished")
+    finally:
+        _close_logger(logger)
 
     _sync_latest_artifacts(metrics_out, "metrics", run_root)
     _sync_latest_artifacts(quality_out, "quality", run_root)
@@ -195,6 +276,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     print(f"- quality_json: {quality_json}")
     print(f"- quality_html: {quality_html}")
     print(f"- logs_path: {logs_out}")
+    print(f"- manifest_path: {run_root / 'run_manifest.json'}")
     print(f"- latest_pointer: artifacts/latest_run.txt")
 
     return 0
