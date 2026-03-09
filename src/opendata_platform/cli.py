@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.set_defaults(func=cmd_dashboard)
 
     run_all = subparsers.add_parser("run-all", help="Run end-to-end pipeline in one command")
-    run_all.add_argument("--db", required=True, help="DuckDB file path")
+    run_all.add_argument("--db", default="data/warehouse.duckdb", help="DuckDB file path")
     run_all.add_argument("--config", default="config.example.yml", help="Pipeline config file")
     run_all.add_argument("--raw", default="data/raw", help="Raw data folder")
     run_all.add_argument("--sql-root", default="sql", help="Root folder for SQL models")
