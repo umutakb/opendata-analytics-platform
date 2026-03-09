@@ -118,6 +118,73 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_all(args: argparse.Namespace) -> int:
+    config = load_config(args.config) if args.config else {}
+
+    run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_root = Path("artifacts") / "runs" / run_id
+    metrics_out = run_root / "metrics"
+    quality_out = run_root / "quality"
+    logs_out = run_root / "logs"
+    logs_out.mkdir(parents=True, exist_ok=True)
+
+    if args.generate_data:
+        days = args.days if args.days is not None else (60 if args.small else 365)
+        orders = args.orders if args.orders is not None else (3000 if args.small else None)
+        customers = args.customers if args.customers is not None else (1200 if args.small else None)
+        products = args.products if args.products is not None else (250 if args.small else 1200)
+        data_stats = generate_synthetic_data(
+            out_dir=args.raw,
+            seed=args.seed,
+            days=days,
+            n_orders=orders,
+            n_customers=customers,
+            n_products=products,
+            end_date=args.end_date,
+        )
+        print(f"[run-all] demo-data: {data_stats}")
+
+    warehouse_stats = build_warehouse(args.raw, args.db)
+    print(f"[run-all] build-warehouse: {warehouse_stats}")
+
+    transform_stats = run_transforms(
+        db_path=args.db,
+        sql_root=args.sql_root,
+        staging_out=args.staging_out,
+        marts_out=args.marts_out,
+    )
+    print(f"[run-all] transform: {transform_stats}")
+
+    eval_days = get_config_value(config, ["metrics", "eval_days"], None)
+    metrics_manifest = run_metrics(
+        db_path=args.db,
+        sql_dir=Path(args.sql_root) / "metrics",
+        out_dir=metrics_out,
+        eval_days=int(eval_days) if eval_days is not None else None,
+    )
+    print(f"[run-all] metrics: {len(metrics_manifest)} files")
+
+    quality_report = run_quality_checks(args.db, config)
+    quality_json, quality_html = write_quality_report(quality_report, quality_out)
+    print(f"[run-all] quality: {quality_report['summary']}")
+
+    _sync_latest_artifacts(metrics_out, "metrics", run_root)
+    _sync_latest_artifacts(quality_out, "quality", run_root)
+    _sync_latest_artifacts(logs_out, "logs", run_root)
+
+    print("")
+    print("Run summary")
+    print(f"- run_id: {run_id}")
+    print(f"- db_path: {args.db}")
+    print(f"- metrics_path: {metrics_out}")
+    print(f"- quality_json: {quality_json}")
+    print(f"- quality_html: {quality_html}")
+    print(f"- logs_path: {logs_out}")
+    print(f"- latest_pointer: artifacts/latest_run.txt")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="opdata", description="OpenData Analytics Platform CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -162,6 +229,33 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--db", required=True, help="DuckDB file path")
     dashboard.add_argument("--run", action="store_true", help="Launch streamlit directly")
     dashboard.set_defaults(func=cmd_dashboard)
+
+    run_all = subparsers.add_parser("run-all", help="Run end-to-end pipeline in one command")
+    run_all.add_argument("--db", required=True, help="DuckDB file path")
+    run_all.add_argument("--config", default="config.example.yml", help="Pipeline config file")
+    run_all.add_argument("--raw", default="data/raw", help="Raw data folder")
+    run_all.add_argument("--sql-root", default="sql", help="Root folder for SQL models")
+    run_all.add_argument("--staging-out", default="data/staging", help="Staging CSV export folder")
+    run_all.add_argument("--marts-out", default="data/marts", help="Marts CSV export folder")
+    run_all.add_argument("--generate-data", action="store_true", help="Generate synthetic data before pipeline")
+    run_all.add_argument("--small", action="store_true", help="Use smaller dataset defaults for faster runs")
+    run_all.add_argument("--seed", type=int, default=42, help="Seed used when --generate-data is enabled")
+    run_all.add_argument("--days", type=int, default=None, help="Days used when --generate-data is enabled")
+    run_all.add_argument("--orders", type=int, default=None, help="Order count used when --generate-data is enabled")
+    run_all.add_argument(
+        "--customers",
+        type=int,
+        default=None,
+        help="Customer count used when --generate-data is enabled",
+    )
+    run_all.add_argument(
+        "--products",
+        type=int,
+        default=None,
+        help="Product count used when --generate-data is enabled",
+    )
+    run_all.add_argument("--end-date", type=str, default=None, help="Optional YYYY-MM-DD for generated data")
+    run_all.set_defaults(func=cmd_run_all)
 
     return parser
 

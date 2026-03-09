@@ -4,7 +4,7 @@ PIP := $(VENV)/bin/pip
 OPDATA := $(VENV)/bin/opdata
 PYTEST := $(VENV)/bin/pytest
 
-.PHONY: venv install demo dashboard test
+.PHONY: venv install demo run-all dashboard test
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -19,6 +19,9 @@ demo:
 	$(OPDATA) transform --db data/warehouse.duckdb
 	$(OPDATA) metrics --db data/warehouse.duckdb --out artifacts/metrics
 	$(OPDATA) quality --db data/warehouse.duckdb --out artifacts/quality --config config.example.yml
+
+run-all:
+	$(OPDATA) run-all --db data/warehouse.duckdb --config config.example.yml --small --generate-data --seed 42
 
 dashboard:
 	$(OPDATA) dashboard --db data/warehouse.duckdb
