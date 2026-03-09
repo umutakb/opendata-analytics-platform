@@ -17,3 +17,10 @@ quality:
     orders.order_date_max_age_days: {warn: 7, fail: 30}
 metrics:
   eval_days: 90
+  enabled:
+    - m_gmv_daily
+    - m_orders_daily
+    - m_aov_daily
+    - m_active_customers_daily
+    - m_retention_cohort
+    - m_net_gmv_daily

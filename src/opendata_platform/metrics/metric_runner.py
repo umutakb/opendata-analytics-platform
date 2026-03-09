@@ -16,6 +16,40 @@ def _read_metric_sql_files(sql_dir: Path) -> list[Path]:
     return files
 
 
+def _resolve_metric_sql_files(sql_dir: Path, enabled_metrics: list[str] | None) -> list[Path]:
+    if not enabled_metrics:
+        return _read_metric_sql_files(sql_dir)
+
+    selected_files: list[Path] = []
+    seen: set[str] = set()
+    missing: list[str] = []
+
+    for metric_name in enabled_metrics:
+        normalized = metric_name.strip()
+        if not normalized:
+            continue
+        if normalized.endswith(".sql"):
+            normalized = normalized[: -len(".sql")]
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+
+        sql_file = sql_dir / f"{normalized}.sql"
+        if not sql_file.exists():
+            missing.append(f"{normalized}.sql")
+            continue
+        selected_files.append(sql_file)
+
+    if missing:
+        raise FileNotFoundError(
+            f"Enabled metric SQL files not found in {sql_dir}: {', '.join(sorted(missing))}"
+        )
+    if not selected_files:
+        raise FileNotFoundError("No enabled metric SQL files selected.")
+
+    return selected_files
+
+
 def _apply_eval_days(df: pd.DataFrame, eval_days: int | None) -> pd.DataFrame:
     if not eval_days:
         return df
@@ -35,6 +69,7 @@ def run_metrics(
     sql_dir: str | Path,
     out_dir: str | Path,
     eval_days: int | None = None,
+    enabled_metrics: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute metric SQL files and write CSV+JSON outputs."""
     sql_path = Path(sql_dir)
@@ -44,7 +79,7 @@ def run_metrics(
     manifest: list[dict[str, Any]] = []
 
     with duckdb.connect(str(db_path)) as conn:
-        for sql_file in _read_metric_sql_files(sql_path):
+        for sql_file in _resolve_metric_sql_files(sql_path, enabled_metrics):
             metric_name = sql_file.stem
             query = sql_file.read_text(encoding="utf-8")
             df = conn.execute(query).df()

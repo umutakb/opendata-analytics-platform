@@ -60,6 +60,26 @@ opdata dashboard --db data/warehouse.duckdb
 
 `opdata dashboard` prints the Streamlit command. Use `opdata dashboard --db data/warehouse.duckdb --run` to launch directly.
 
+## Metrics Selection (Config-Driven)
+
+You can control which metrics are executed by editing `config.example.yml`:
+
+```yaml
+metrics:
+  eval_days: 90
+  enabled:
+    - m_gmv_daily
+    - m_orders_daily
+    - m_aov_daily
+    - m_active_customers_daily
+    - m_retention_cohort
+    - m_net_gmv_daily
+```
+
+- If `metrics.enabled` is present, only listed metrics run.
+- If `metrics.enabled` is missing or empty, all SQL files under `sql/metrics/` run.
+- To disable one metric, remove it from `enabled`.
+
 ## Folder Structure
 
 ```text

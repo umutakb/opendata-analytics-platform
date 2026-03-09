@@ -16,6 +16,16 @@ from opendata_platform.transform.run_sql import run_transforms
 from opendata_platform.warehouse.build_db import build_warehouse
 
 
+def _parse_enabled_metrics(config: dict | None) -> list[str] | None:
+    if not config:
+        return None
+    enabled = get_config_value(config, ["metrics", "enabled"], None)
+    if not isinstance(enabled, list):
+        return None
+    values = [str(item).strip() for item in enabled if str(item).strip()]
+    return values or None
+
+
 def _resolve_artifact_output(out_arg: str | None, artifact_type: str) -> tuple[Path, Path | None]:
     if out_arg:
         return Path(out_arg), None
@@ -73,9 +83,11 @@ def cmd_transform(args: argparse.Namespace) -> int:
 
 def cmd_metrics(args: argparse.Namespace) -> int:
     eval_days: int | None = args.eval_days
+    config: dict = {}
     if args.config:
         config = load_config(args.config)
         eval_days = int(get_config_value(config, ["metrics", "eval_days"], eval_days))
+    enabled_metrics = _parse_enabled_metrics(config)
 
     output_dir, run_root = _resolve_artifact_output(args.out, "metrics")
     manifest = run_metrics(
@@ -83,6 +95,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         sql_dir=Path(args.sql_root) / "metrics",
         out_dir=output_dir,
         eval_days=eval_days,
+        enabled_metrics=enabled_metrics,
     )
     if run_root is not None:
         _sync_latest_artifacts(output_dir, "metrics", run_root)
@@ -156,11 +169,13 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     print(f"[run-all] transform: {transform_stats}")
 
     eval_days = get_config_value(config, ["metrics", "eval_days"], None)
+    enabled_metrics = _parse_enabled_metrics(config)
     metrics_manifest = run_metrics(
         db_path=args.db,
         sql_dir=Path(args.sql_root) / "metrics",
         out_dir=metrics_out,
         eval_days=int(eval_days) if eval_days is not None else None,
+        enabled_metrics=enabled_metrics,
     )
     print(f"[run-all] metrics: {len(metrics_manifest)} files")
 
@@ -215,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     metrics.add_argument("--db", required=True, help="DuckDB file path")
     metrics.add_argument("--out", default=None, help="Metrics output folder (optional)")
     metrics.add_argument("--sql-root", default="sql", help="Root folder for SQL models")
-    metrics.add_argument("--config", default="config.example.yml", help="Config for eval_days")
+    metrics.add_argument("--config", default="config.example.yml", help="Config for eval_days and enabled metrics")
     metrics.add_argument("--eval-days", type=int, default=None, help="Optional override for eval window")
     metrics.set_defaults(func=cmd_metrics)
 
