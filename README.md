@@ -138,9 +138,8 @@ python -m opendata_platform.ingest.download_open_data --out data/raw_open
 
 ## Screenshot Placeholders
 
-- `docs/screenshots/dashboard_overview.png`
-- `docs/screenshots/cohort_retention.png`
-- `docs/screenshots/quality_report.png`
+- `docs/screenshots
+
 
 ## License
 
