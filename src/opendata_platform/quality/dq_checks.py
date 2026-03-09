@@ -22,6 +22,30 @@ REQUIRED_RELATIONS = [
     "fct_order_items",
 ]
 
+REFERENTIAL_INTEGRITY_RULES = [
+    {
+        "name": "orders.customer_id -> customers.customer_id",
+        "left_table": "orders",
+        "left_column": "customer_id",
+        "right_table": "customers",
+        "right_column": "customer_id",
+    },
+    {
+        "name": "order_items.order_id -> orders.order_id",
+        "left_table": "order_items",
+        "left_column": "order_id",
+        "right_table": "orders",
+        "right_column": "order_id",
+    },
+    {
+        "name": "order_items.product_id -> products.product_id",
+        "left_table": "order_items",
+        "left_column": "product_id",
+        "right_table": "products",
+        "right_column": "product_id",
+    },
+]
+
 
 def _parse_target(target: str) -> tuple[str, str]:
     parts = target.split(".")
@@ -173,6 +197,86 @@ def check_numeric_ranges(
     return rows
 
 
+def check_referential_integrity(
+    conn: duckdb.DuckDBPyConnection,
+    rules: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    active_rules = rules or REFERENTIAL_INTEGRITY_RULES
+
+    for rule in active_rules:
+        name = rule["name"]
+        left_table = rule["left_table"]
+        left_column = rule["left_column"]
+        right_table = rule["right_table"]
+        right_column = rule["right_column"]
+
+        if not _relation_exists(conn, left_table) or not _relation_exists(conn, right_table):
+            rows.append(
+                {
+                    "check_type": "referential_integrity",
+                    "target": name,
+                    "status": "fail",
+                    "observed": None,
+                    "missing_count": None,
+                    "warn_threshold": 0,
+                    "fail_threshold": 0,
+                    "message": "Missing relation for referential integrity check",
+                    "sample_rows": [],
+                }
+            )
+            continue
+
+        missing_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM {left_table} l
+                LEFT JOIN {right_table} r
+                  ON l.{left_column} = r.{right_column}
+                WHERE l.{left_column} IS NOT NULL
+                  AND r.{right_column} IS NULL
+                """
+            ).fetchone()[0]
+        )
+        sample_rows = [
+            row[0]
+            for row in conn.execute(
+                f"""
+                SELECT l.{left_column} AS missing_reference
+                FROM {left_table} l
+                LEFT JOIN {right_table} r
+                  ON l.{left_column} = r.{right_column}
+                WHERE l.{left_column} IS NOT NULL
+                  AND r.{right_column} IS NULL
+                LIMIT 5
+                """
+            ).fetchall()
+        ]
+
+        status = "fail" if missing_count > 0 else "pass"
+        if missing_count > 0:
+            message = f"missing_count={missing_count}; samples={sample_rows}"
+        else:
+            message = "No missing references"
+
+        rows.append(
+            {
+                "check_type": "referential_integrity",
+                "target": name,
+                "status": status,
+                "observed": missing_count,
+                "missing_count": missing_count,
+                "warn_threshold": 0,
+                "fail_threshold": 0,
+                "message": message,
+                "sample_rows": sample_rows,
+            }
+        )
+
+    return rows
+
+
 def check_freshness(
     conn: duckdb.DuckDBPyConnection,
     freshness_rules: dict[str, dict[str, Any]],
@@ -244,6 +348,7 @@ def run_quality_checks(db_path: str | Path, config: dict[str, Any]) -> dict[str,
         rows.extend(check_schema_existence(conn, REQUIRED_RELATIONS))
         rows.extend(check_null_rate_thresholds(conn, quality_cfg.get("null_rate_thresholds", {})))
         rows.extend(check_pk_uniqueness(conn, quality_cfg.get("pk_uniqueness", [])))
+        rows.extend(check_referential_integrity(conn, REFERENTIAL_INTEGRITY_RULES))
         rows.extend(check_numeric_ranges(conn, quality_cfg.get("ranges", {})))
         rows.extend(check_freshness(conn, quality_cfg.get("freshness", {})))
 
