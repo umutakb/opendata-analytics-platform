@@ -1,17 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
-from datetime import date
 from pathlib import Path
 
 import duckdb
-
-from opendata_platform.ingest.generate_data import generate_synthetic_data
-from opendata_platform.transform.run_sql import run_transforms
-from opendata_platform.warehouse.build_db import build_warehouse
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,68 +38,66 @@ def _find_artifact_file(artifacts_root: Path, artifact_type: str, file_name: str
     raise AssertionError(f"Artifact file not found: {artifact_type}/{file_name}")
 
 
-def test_pipeline_e2e(tmp_path: Path) -> None:
-    raw_dir = tmp_path / "data" / "raw"
-    staging_dir = tmp_path / "data" / "staging"
-    marts_dir = tmp_path / "data" / "marts"
+def _resolve_latest_run_dir(tmp_path: Path) -> Path:
+    pointer_path = tmp_path / "artifacts" / "latest_run.txt"
+    assert pointer_path.exists()
+
+    pointer_value = pointer_path.read_text(encoding="utf-8").strip()
+    run_dir = Path(pointer_value)
+    if not run_dir.is_absolute():
+        run_dir = (tmp_path / run_dir).resolve()
+    return run_dir
+
+
+def test_pipeline_e2e_run_all_small(tmp_path: Path) -> None:
     db_path = tmp_path / "data" / "warehouse.duckdb"
     artifacts_root = tmp_path / "artifacts"
 
-    stats = generate_synthetic_data(
-        out_dir=raw_dir,
-        seed=42,
-        days=60,
-        n_orders=3000,
-        n_customers=1200,
-        n_products=250,
-        end_date=date.today().isoformat(),
-    )
-    assert stats["orders"] == 3000
-
-    warehouse_stats = build_warehouse(raw_dir, db_path)
-    assert warehouse_stats["orders"] == 3000
-
-    transform_stats = run_transforms(
-        db_path=db_path,
-        sql_root=PROJECT_ROOT / "sql",
-        staging_out=staging_dir,
-        marts_out=marts_dir,
-    )
-    assert transform_stats["staging_exports"] >= 4
-    assert transform_stats["marts_exports"] >= 4
-
     _run_cli(
         tmp_path,
         [
-            "metrics",
+            "run-all",
             "--db",
             str(db_path),
+            "--small",
+            "--generate-data",
+            "--seed",
+            "42",
+            "--config",
+            str(PROJECT_ROOT / "config.example.yml"),
             "--sql-root",
             str(PROJECT_ROOT / "sql"),
-            "--config",
-            str(PROJECT_ROOT / "config.example.yml"),
-        ],
-    )
-    _run_cli(
-        tmp_path,
-        [
-            "quality",
-            "--db",
-            str(db_path),
-            "--config",
-            str(PROJECT_ROOT / "config.example.yml"),
         ],
     )
 
-    assert (raw_dir / "orders.csv").exists()
-    assert (staging_dir / "stg_orders.csv").exists()
-    assert (marts_dir / "fct_orders.csv").exists()
+    assert db_path.exists()
+    assert (tmp_path / "data" / "staging" / "stg_orders.csv").exists()
+    assert (tmp_path / "data" / "marts" / "fct_orders.csv").exists()
+    assert (artifacts_root / "latest_run.txt").exists()
     assert _find_artifact_file(artifacts_root, "metrics", "m_gmv_daily.csv").exists()
     assert _find_artifact_file(artifacts_root, "metrics", "m_net_gmv_daily.csv").exists()
     assert _find_artifact_file(artifacts_root, "metrics", "m_retention_cohort.json").exists()
     assert _find_artifact_file(artifacts_root, "quality", "report.json").exists()
     assert _find_artifact_file(artifacts_root, "quality", "report.html").exists()
-    assert (artifacts_root / "latest_run.txt").exists()
+
+    latest_run_dir = _resolve_latest_run_dir(tmp_path)
+    manifest_path = latest_run_dir / "run_manifest.json"
+    log_path = latest_run_dir / "logs" / "run.log"
+    assert manifest_path.exists()
+    assert log_path.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["run_id"]
+    assert manifest["started_at"]
+    assert manifest["finished_at"]
+    assert "build_warehouse" in manifest["durations_sec"]
+    assert "transform" in manifest["durations_sec"]
+    assert "metrics" in manifest["durations_sec"]
+    assert "quality" in manifest["durations_sec"]
+    assert isinstance(manifest.get("metrics_run", []), list)
+    assert "m_gmv_daily" in manifest.get("metrics_run", [])
+    assert "quality_summary" in manifest
+    assert set(manifest["quality_summary"]).issuperset({"pass", "warn", "fail"})
 
     with duckdb.connect(str(db_path)) as conn:
         relations = {
