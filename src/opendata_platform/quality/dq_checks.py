@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -339,18 +341,26 @@ def summarize_checks(check_rows: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
+def discover_quality_checks() -> list[Any]:
+    from opendata_platform.quality import checks as checks_pkg
+
+    modules: list[Any] = []
+    for module_info in sorted(pkgutil.iter_modules(checks_pkg.__path__), key=lambda item: item.name):
+        if module_info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{checks_pkg.__name__}.{module_info.name}")
+        if not hasattr(module, "run"):
+            raise ValueError(f"Quality check module missing run(conn, config): {module.__name__}")
+        modules.append(module)
+    return modules
+
+
 def run_quality_checks(db_path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
     """Run all quality checks from config on DuckDB."""
-    quality_cfg = config.get("quality", {})
-
     with duckdb.connect(str(db_path)) as conn:
         rows: list[dict[str, Any]] = []
-        rows.extend(check_schema_existence(conn, REQUIRED_RELATIONS))
-        rows.extend(check_null_rate_thresholds(conn, quality_cfg.get("null_rate_thresholds", {})))
-        rows.extend(check_pk_uniqueness(conn, quality_cfg.get("pk_uniqueness", [])))
-        rows.extend(check_referential_integrity(conn, REFERENTIAL_INTEGRITY_RULES))
-        rows.extend(check_numeric_ranges(conn, quality_cfg.get("ranges", {})))
-        rows.extend(check_freshness(conn, quality_cfg.get("freshness", {})))
+        for check_module in discover_quality_checks():
+            rows.extend(check_module.run(conn, config))
 
     return {
         "generated_at": date.today().isoformat(),

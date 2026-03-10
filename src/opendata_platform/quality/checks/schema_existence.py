@@ -1,0 +1,10 @@
+from __future__ import annotations
+
+from typing import Any
+
+from opendata_platform.quality import dq_checks
+
+
+def run(conn: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+    return dq_checks.check_schema_existence(conn, dq_checks.REQUIRED_RELATIONS)
+
