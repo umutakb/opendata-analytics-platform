@@ -20,13 +20,13 @@ from opendata_platform.transform.run_sql import run_transforms
 from opendata_platform.warehouse.build_db import build_warehouse
 
 
-def _parse_enabled_metrics(config: dict | None) -> list[str] | None:
+def _parse_metric_list(config: dict | None, key: str) -> list[str] | None:
     if not config:
         return None
-    enabled = get_config_value(config, ["metrics", "enabled"], None)
-    if not isinstance(enabled, list):
+    values = get_config_value(config, ["metrics", key], None)
+    if not isinstance(values, list):
         return None
-    values = [str(item).strip() for item in enabled if str(item).strip()]
+    values = [str(item).strip() for item in values if str(item).strip()]
     return values or None
 
 
@@ -135,7 +135,8 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     if args.config:
         config = load_config(args.config)
         eval_days = int(get_config_value(config, ["metrics", "eval_days"], eval_days))
-    enabled_metrics = _parse_enabled_metrics(config)
+    enabled_metrics = _parse_metric_list(config, "enabled")
+    disabled_metrics = _parse_metric_list(config, "disabled")
 
     output_dir, run_root = _resolve_artifact_output(args.out, "metrics")
     manifest = run_metrics(
@@ -144,6 +145,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         out_dir=output_dir,
         eval_days=eval_days,
         enabled_metrics=enabled_metrics,
+        disabled_metrics=disabled_metrics,
     )
     if run_root is not None:
         _sync_latest_artifacts(output_dir, "metrics", run_root)
@@ -249,7 +251,8 @@ def cmd_run_all(args: argparse.Namespace) -> int:
         print(f"[run-all] transform: {transform_stats}")
 
         eval_days = get_config_value(config, ["metrics", "eval_days"], None)
-        enabled_metrics = _parse_enabled_metrics(config)
+        enabled_metrics = _parse_metric_list(config, "enabled")
+        disabled_metrics = _parse_metric_list(config, "disabled")
         start = time.perf_counter()
         metrics_manifest = run_metrics(
             db_path=args.db,
@@ -257,6 +260,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
             out_dir=metrics_out,
             eval_days=int(eval_days) if eval_days is not None else None,
             enabled_metrics=enabled_metrics,
+            disabled_metrics=disabled_metrics,
         )
         step_durations["metrics"] = round(time.perf_counter() - start, 3)
         logger.info(

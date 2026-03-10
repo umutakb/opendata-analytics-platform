@@ -74,11 +74,13 @@ metrics:
     - m_active_customers_daily
     - m_retention_cohort
     - m_net_gmv_daily
+  disabled:
+    - m_net_gmv_daily
 ```
 
 - If `metrics.enabled` is present, only listed metrics run.
-- If `metrics.enabled` is missing or empty, all SQL files under `sql/metrics/` run.
-- To disable one metric, remove it from `enabled`.
+- `metrics.disabled` always applies as blacklist.
+- If `metrics.enabled` is missing or empty, all discovered `sql/metrics/*.sql` files run except disabled ones.
 
 ## Folder Structure
 

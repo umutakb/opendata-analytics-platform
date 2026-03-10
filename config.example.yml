@@ -24,3 +24,4 @@ metrics:
     - m_active_customers_daily
     - m_retention_cohort
     - m_net_gmv_daily
+  disabled: []

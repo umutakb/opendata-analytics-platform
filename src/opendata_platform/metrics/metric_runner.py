@@ -9,45 +9,54 @@ import duckdb
 import pandas as pd
 
 
-def _read_metric_sql_files(sql_dir: Path) -> list[Path]:
+def _normalize_metric_name(value: str) -> str:
+    metric_name = value.strip()
+    if metric_name.endswith(".sql"):
+        metric_name = metric_name[: -len(".sql")]
+    return metric_name
+
+
+def discover_metric_sql_files(sql_dir: Path) -> dict[str, Path]:
     files = sorted(sql_dir.glob("*.sql"))
     if not files:
         raise FileNotFoundError(f"No metric SQL files found in {sql_dir}")
-    return files
+    return {sql_file.stem: sql_file for sql_file in files}
 
 
-def _resolve_metric_sql_files(sql_dir: Path, enabled_metrics: list[str] | None) -> list[Path]:
-    if not enabled_metrics:
-        return _read_metric_sql_files(sql_dir)
+def _resolve_metric_sql_files(
+    sql_dir: Path,
+    enabled_metrics: list[str] | None,
+    disabled_metrics: list[str] | None,
+) -> list[Path]:
+    discovered = discover_metric_sql_files(sql_dir)
+    disabled = {_normalize_metric_name(item) for item in (disabled_metrics or []) if str(item).strip()}
 
-    selected_files: list[Path] = []
-    seen: set[str] = set()
-    missing: list[str] = []
+    selected_names: list[str] = []
+    if enabled_metrics:
+        missing: list[str] = []
+        seen: set[str] = set()
+        for raw_name in enabled_metrics:
+            name = _normalize_metric_name(str(raw_name))
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if name not in discovered:
+                missing.append(f"{name}.sql")
+                continue
+            if name in disabled:
+                continue
+            selected_names.append(name)
+        if missing:
+            raise FileNotFoundError(
+                f"Enabled metric SQL files not found in {sql_dir}: {', '.join(sorted(missing))}"
+            )
+    else:
+        selected_names = [name for name in sorted(discovered) if name not in disabled]
 
-    for metric_name in enabled_metrics:
-        normalized = metric_name.strip()
-        if not normalized:
-            continue
-        if normalized.endswith(".sql"):
-            normalized = normalized[: -len(".sql")]
-        if normalized in seen:
-            continue
-        seen.add(normalized)
+    if not selected_names:
+        raise FileNotFoundError("No metric SQL files selected after enabled/disabled filtering.")
 
-        sql_file = sql_dir / f"{normalized}.sql"
-        if not sql_file.exists():
-            missing.append(f"{normalized}.sql")
-            continue
-        selected_files.append(sql_file)
-
-    if missing:
-        raise FileNotFoundError(
-            f"Enabled metric SQL files not found in {sql_dir}: {', '.join(sorted(missing))}"
-        )
-    if not selected_files:
-        raise FileNotFoundError("No enabled metric SQL files selected.")
-
-    return selected_files
+    return [discovered[name] for name in selected_names]
 
 
 def _apply_eval_days(df: pd.DataFrame, eval_days: int | None) -> pd.DataFrame:
@@ -70,6 +79,7 @@ def run_metrics(
     out_dir: str | Path,
     eval_days: int | None = None,
     enabled_metrics: list[str] | None = None,
+    disabled_metrics: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute metric SQL files and write CSV+JSON outputs."""
     sql_path = Path(sql_dir)
@@ -79,7 +89,7 @@ def run_metrics(
     manifest: list[dict[str, Any]] = []
 
     with duckdb.connect(str(db_path)) as conn:
-        for sql_file in _resolve_metric_sql_files(sql_path, enabled_metrics):
+        for sql_file in _resolve_metric_sql_files(sql_path, enabled_metrics, disabled_metrics):
             metric_name = sql_file.stem
             query = sql_file.read_text(encoding="utf-8")
             df = conn.execute(query).df()
