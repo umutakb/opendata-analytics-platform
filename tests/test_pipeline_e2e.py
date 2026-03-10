@@ -60,13 +60,21 @@ def test_pipeline_e2e_run_all_small(tmp_path: Path) -> None:
             "--db",
             str(db_path),
             "--small",
-            "--generate-data",
-            "--seed",
-            "42",
             "--config",
             str(PROJECT_ROOT / "config.example.yml"),
             "--sql-root",
             str(PROJECT_ROOT / "sql"),
+        ],
+    )
+
+    _run_cli(
+        tmp_path,
+        [
+            "validate-contract",
+            "--db",
+            str(db_path),
+            "--contract",
+            str(PROJECT_ROOT / "contracts" / "schema_v1.yml"),
         ],
     )
 
