@@ -204,11 +204,6 @@ opendata-analytics-platform/
 - Yeni major sürümlerde contract ve metric adlarında uyumsuz değişiklikler olabilir.
 - Minor sürümler geriye uyumluluğu korumayı hedefler.
 
-## Screenshots (Placeholders)
-
-- `docs/screenshots/overview.png`
-- `docs/screenshots/cohorts.png`
-- `docs/screenshots/quality.png`
 
 ## License
 
