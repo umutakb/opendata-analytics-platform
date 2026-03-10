@@ -20,6 +20,7 @@ data/*.duckdb
 
 # Generated raw/staging/marts outputs
 data/raw/*.csv
+data/raw/_downloads/
 data/staging/*.csv
 data/marts/*.csv
 

@@ -12,6 +12,7 @@ import shutil
 
 from opendata_platform.config import get_config_value, load_config
 from opendata_platform.ingest.generate_data import generate_synthetic_data
+from opendata_platform.ingest.ingest import ingest_data
 from opendata_platform.metrics.metric_runner import run_metrics
 from opendata_platform.quality.dq_checks import run_quality_checks
 from opendata_platform.quality.report import write_quality_report
@@ -96,6 +97,27 @@ def cmd_build_warehouse(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest(args: argparse.Namespace) -> int:
+    result = ingest_data(
+        source=args.source,
+        out_dir=args.out,
+        seed=args.seed,
+        days=args.days,
+        n_orders=args.orders,
+        n_customers=args.customers,
+        n_products=args.products,
+        end_date=args.end_date,
+        dataset=args.dataset,
+    )
+    if "fallback_message" in result:
+        print(f"[ingest] {result['fallback_message']}")
+    print(
+        "Ingest complete: "
+        f"requested={result['source_requested']} used={result['source_used']} out={args.out} stats={result['stats']}"
+    )
+    return 0
+
+
 def cmd_transform(args: argparse.Namespace) -> int:
     stats = run_transforms(
         db_path=args.db,
@@ -171,33 +193,39 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     step_durations: dict[str, float] = {}
     metrics_manifest: list[dict] = []
     quality_report: dict = {}
+    ingest_result: dict[str, object] = {}
     quality_json = quality_out / "report.json"
     quality_html = quality_out / "report.html"
     logger = _build_run_logger(logs_out, run_id)
     logger.info("run-all started run_id=%s db_path=%s config_path=%s", run_id, args.db, args.config)
 
     try:
-        if args.generate_data:
-            days = args.days if args.days is not None else (60 if args.small else 365)
-            orders = args.orders if args.orders is not None else (3000 if args.small else None)
-            customers = args.customers if args.customers is not None else (1200 if args.small else None)
-            products = args.products if args.products is not None else (250 if args.small else 1200)
+        days = args.days if args.days is not None else (60 if args.small else 365)
+        orders = args.orders if args.orders is not None else (3000 if args.small else None)
+        customers = args.customers if args.customers is not None else (1200 if args.small else None)
+        products = args.products if args.products is not None else (250 if args.small else 1200)
+        source = args.source or "synthetic"
 
-            start = time.perf_counter()
-            data_stats = generate_synthetic_data(
-                out_dir=args.raw,
-                seed=args.seed,
-                days=days,
-                n_orders=orders,
-                n_customers=customers,
-                n_products=products,
-                end_date=args.end_date,
-            )
-            step_durations["demo_data"] = round(time.perf_counter() - start, 3)
-            logger.info("step=demo_data duration_sec=%.3f details=%s", step_durations["demo_data"], data_stats)
-            print(f"[run-all] demo-data: {data_stats}")
-        else:
-            logger.info("step=demo_data skipped generate_data=false")
+        start = time.perf_counter()
+        ingest_result = ingest_data(
+            source=source,
+            out_dir=args.raw,
+            seed=args.seed,
+            days=days,
+            n_orders=orders,
+            n_customers=customers,
+            n_products=products,
+            end_date=args.end_date,
+            dataset=args.dataset,
+        )
+        step_durations["ingest"] = round(time.perf_counter() - start, 3)
+        logger.info("step=ingest duration_sec=%.3f details=%s", step_durations["ingest"], ingest_result)
+        if "fallback_message" in ingest_result:
+            print(f"[run-all] {ingest_result['fallback_message']}")
+        print(
+            "[run-all] ingest: "
+            f"requested={ingest_result['source_requested']} used={ingest_result['source_used']} stats={ingest_result['stats']}"
+        )
 
         start = time.perf_counter()
         warehouse_stats = build_warehouse(args.raw, args.db)
@@ -253,6 +281,8 @@ def cmd_run_all(args: argparse.Namespace) -> int:
             "durations_sec": step_durations,
             "db_path": str(args.db),
             "config_path": str(args.config) if args.config else None,
+            "ingest_source_requested": ingest_result.get("source_requested"),
+            "ingest_source_used": ingest_result.get("source_used"),
             "metrics_run": [item["metric"] for item in metrics_manifest],
             "quality_summary": quality_report.get("summary", {}),
         }
@@ -296,6 +326,18 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--end-date", type=str, default=None, help="Optional YYYY-MM-DD")
     demo.set_defaults(func=cmd_demo_data)
 
+    ingest = subparsers.add_parser("ingest", help="Ingest data from synthetic or open source")
+    ingest.add_argument("--source", choices=["synthetic", "open"], default="synthetic")
+    ingest.add_argument("--out", required=True, help="Output raw data folder")
+    ingest.add_argument("--dataset", default="uci_online_retail", help="Open dataset name")
+    ingest.add_argument("--seed", type=int, default=42)
+    ingest.add_argument("--days", type=int, default=365)
+    ingest.add_argument("--orders", type=int, default=None, help="Optional override for order count")
+    ingest.add_argument("--customers", type=int, default=None, help="Optional override for customer count")
+    ingest.add_argument("--products", type=int, default=1200, help="Product count")
+    ingest.add_argument("--end-date", type=str, default=None, help="Optional YYYY-MM-DD")
+    ingest.set_defaults(func=cmd_ingest)
+
     warehouse = subparsers.add_parser("build-warehouse", help="Load raw CSV into DuckDB")
     warehouse.add_argument("--raw", required=True, help="Raw data folder")
     warehouse.add_argument("--db", required=True, help="DuckDB file path")
@@ -334,7 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--sql-root", default="sql", help="Root folder for SQL models")
     run_all.add_argument("--staging-out", default="data/staging", help="Staging CSV export folder")
     run_all.add_argument("--marts-out", default="data/marts", help="Marts CSV export folder")
-    run_all.add_argument("--generate-data", action="store_true", help="Generate synthetic data before pipeline")
+    run_all.add_argument("--source", choices=["synthetic", "open"], default="synthetic", help="Ingestion source")
+    run_all.add_argument("--dataset", default="uci_online_retail", help="Open dataset name")
+    run_all.add_argument("--generate-data", action="store_true", help="Deprecated alias; ingestion always runs")
     run_all.add_argument("--small", action="store_true", help="Use smaller dataset defaults for faster runs")
     run_all.add_argument("--seed", type=int, default=42, help="Seed used when --generate-data is enabled")
     run_all.add_argument("--days", type=int, default=None, help="Days used when --generate-data is enabled")
