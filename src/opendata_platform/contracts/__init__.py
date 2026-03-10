@@ -1,0 +1,2 @@
+"""Data contract validation package."""
+

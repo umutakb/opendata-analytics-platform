@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 
 from opendata_platform.config import get_config_value, load_config
+from opendata_platform.contracts.validator import validate_contract
 from opendata_platform.ingest.generate_data import generate_synthetic_data
 from opendata_platform.ingest.ingest import ingest_data
 from opendata_platform.metrics.metric_runner import run_metrics
@@ -181,6 +182,17 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate_contract(args: argparse.Namespace) -> int:
+    report = validate_contract(db_path=args.db, contract_path=args.contract)
+    summary = report.get("summary", {})
+    print(f"Contract validation summary: {summary}")
+    if summary.get("fail", 0) > 0:
+        print("Contract validation failed.")
+        return 1
+    print("Contract validation passed.")
+    return 0
+
+
 def cmd_run_all(args: argparse.Namespace) -> int:
     config = load_config(args.config) if args.config else {}
 
@@ -196,6 +208,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     metrics_manifest: list[dict] = []
     quality_report: dict = {}
     ingest_result: dict[str, object] = {}
+    contract_report: dict[str, object] | None = None
     quality_json = quality_out / "report.json"
     quality_html = quality_out / "report.html"
     logger = _build_run_logger(logs_out, run_id)
@@ -277,6 +290,17 @@ def cmd_run_all(args: argparse.Namespace) -> int:
         logger.info("step=quality duration_sec=%.3f summary=%s", step_durations["quality"], quality_report["summary"])
         print(f"[run-all] quality: {quality_report['summary']}")
 
+        if args.validate_contract:
+            start = time.perf_counter()
+            contract_report = validate_contract(db_path=args.db, contract_path=args.contract)
+            step_durations["validate_contract"] = round(time.perf_counter() - start, 3)
+            logger.info(
+                "step=validate_contract duration_sec=%.3f summary=%s",
+                step_durations["validate_contract"],
+                contract_report.get("summary", {}),
+            )
+            print(f"[run-all] contract: {contract_report.get('summary', {})}")
+
         finished_at = datetime.now()
         run_manifest = {
             "run_id": run_id,
@@ -289,6 +313,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
             "ingest_source_used": ingest_result.get("source_used"),
             "metrics_run": [item["metric"] for item in metrics_manifest],
             "quality_summary": quality_report.get("summary", {}),
+            "contract_validation_summary": (contract_report or {}).get("summary"),
         }
         manifest_path = run_root / "run_manifest.json"
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,9 +334,14 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     print(f"- metrics_path: {metrics_out}")
     print(f"- quality_json: {quality_json}")
     print(f"- quality_html: {quality_html}")
+    if contract_report is not None:
+        print(f"- contract_summary: {contract_report.get('summary', {})}")
     print(f"- logs_path: {logs_out}")
     print(f"- manifest_path: {run_root / 'run_manifest.json'}")
     print(f"- latest_pointer: artifacts/latest_run.txt")
+
+    if contract_report is not None and contract_report.get("summary", {}).get("fail", 0) > 0:
+        return 1
 
     return 0
 
@@ -373,6 +403,11 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--run", action="store_true", help="Launch streamlit directly")
     dashboard.set_defaults(func=cmd_dashboard)
 
+    validate_contract_cmd = subparsers.add_parser("validate-contract", help="Validate warehouse against schema contract")
+    validate_contract_cmd.add_argument("--db", required=True, help="DuckDB file path")
+    validate_contract_cmd.add_argument("--contract", required=True, help="Contract YAML path")
+    validate_contract_cmd.set_defaults(func=cmd_validate_contract)
+
     run_all = subparsers.add_parser("run-all", help="Run end-to-end pipeline in one command")
     run_all.add_argument("--db", default="data/warehouse.duckdb", help="DuckDB file path")
     run_all.add_argument("--config", default="config.example.yml", help="Pipeline config file")
@@ -382,6 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--marts-out", default="data/marts", help="Marts CSV export folder")
     run_all.add_argument("--source", choices=["synthetic", "open"], default="synthetic", help="Ingestion source")
     run_all.add_argument("--dataset", default="uci_online_retail", help="Open dataset name")
+    run_all.add_argument("--validate-contract", action="store_true", help="Run contract validation at the end")
+    run_all.add_argument("--contract", default="contracts/schema_v1.yml", help="Contract YAML path")
     run_all.add_argument("--generate-data", action="store_true", help="Deprecated alias; ingestion always runs")
     run_all.add_argument("--small", action="store_true", help="Use smaller dataset defaults for faster runs")
     run_all.add_argument("--seed", type=int, default=42, help="Seed used when --generate-data is enabled")

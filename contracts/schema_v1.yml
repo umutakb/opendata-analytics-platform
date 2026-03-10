@@ -1,0 +1,36 @@
+schema_version: 1
+relations:
+  customers:
+    columns: [customer_id, signup_date, country, email]
+  products:
+    columns: [product_id, category, created_at]
+  orders:
+    columns: [order_id, customer_id, order_date, status, total_amount]
+  order_items:
+    columns: [order_id, product_id, quantity, unit_price]
+
+  stg_customers:
+    columns: [customer_id, signup_date, country, email]
+  stg_products:
+    columns: [product_id, category, created_at]
+  stg_orders:
+    columns: [order_id, customer_id, order_date, order_status, total_amount]
+  stg_order_items:
+    columns: [order_id, product_id, quantity, unit_price]
+
+  dim_customers:
+    columns: [customer_id, signup_date, country, email]
+  dim_products:
+    columns: [product_id, category, created_at]
+  fct_orders:
+    columns:
+      - order_id
+      - customer_id
+      - order_date
+      - order_status
+      - order_total_amount
+      - order_amount_from_items
+      - reconciliation_delta
+      - item_lines
+  fct_order_items:
+    columns: [order_id, product_id, quantity, unit_price, item_total]

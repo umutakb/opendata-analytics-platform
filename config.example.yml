@@ -1,4 +1,5 @@
 version: 1
+schema_version: 1
 warehouse:
   db_path: "data/warehouse.duckdb"
 quality:
