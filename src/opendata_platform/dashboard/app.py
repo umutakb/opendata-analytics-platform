@@ -171,6 +171,34 @@ def _build_order_where_clause(filters: dict[str, Any], order_alias: str = "o", c
     return " AND ".join(clauses), params
 
 
+def _build_net_order_where_clause(filters: dict[str, Any], order_alias: str = "o", customer_alias: str = "c") -> tuple[str, list[Any]]:
+    clauses = [
+        f"{order_alias}.order_status IN ('paid', 'refunded')",
+        f"{order_alias}.order_date BETWEEN ? AND ?",
+    ]
+    params: list[Any] = [filters["start_date"], filters["end_date"]]
+
+    countries = filters.get("countries", [])
+    if countries:
+        placeholders = ", ".join(["?"] * len(countries))
+        clauses.append(f"{customer_alias}.country IN ({placeholders})")
+        params.extend(countries)
+
+    categories = filters.get("categories", [])
+    if categories:
+        placeholders = ", ".join(["?"] * len(categories))
+        clauses.append(
+            "EXISTS ("
+            "SELECT 1 FROM fct_order_items oi_filter "
+            "JOIN dim_products p_filter ON oi_filter.product_id = p_filter.product_id "
+            f"WHERE oi_filter.order_id = {order_alias}.order_id AND p_filter.category IN ({placeholders})"
+            ")"
+        )
+        params.extend(categories)
+
+    return " AND ".join(clauses), params
+
+
 def _build_top_category_where_clause(
     filters: dict[str, Any],
     order_alias: str = "o",
@@ -244,6 +272,18 @@ def _build_chart_df(ts_df: pd.DataFrame, value_col: str, ma_col: str) -> pd.Data
     return out
 
 
+def _compute_net_gmv_30d(net_df: pd.DataFrame) -> float:
+    if net_df.empty:
+        return 0.0
+
+    work = net_df.copy()
+    work["metric_date"] = pd.to_datetime(work["metric_date"])
+    reference_date = work["metric_date"].max().date()
+    start_30d = reference_date - timedelta(days=29)
+    window = work.loc[work["metric_date"].dt.date >= start_30d]
+    return float(window["net_gmv"].sum())
+
+
 def _build_retention_display(retention_df: pd.DataFrame) -> pd.DataFrame:
     retention_work = retention_df.copy()
     retention_work["cohort_month"] = pd.to_datetime(retention_work["cohort_month"])
@@ -304,77 +344,107 @@ def main() -> None:
     filters = _read_dashboard_filters(args.db)
     st.title("OpenData Analytics Platform Dashboard")
     st.caption(f"Warehouse: {args.db}")
-    order_where_clause, order_where_params = _build_order_where_clause(filters)
-    ts_sql = f"""
-    SELECT
-      o.order_date AS metric_date,
-      ROUND(SUM(o.order_amount_from_items), 2) AS gmv,
-      COUNT(*) AS orders
-    FROM fct_orders o
-    JOIN dim_customers c ON o.customer_id = c.customer_id
-    WHERE {order_where_clause}
-    GROUP BY 1
-    ORDER BY 1;
-    """
-    ts_df = _run_query(args.db, ts_sql, order_where_params)
-    if not ts_df.empty:
-        ts_df["metric_date"] = pd.to_datetime(ts_df["metric_date"])
+    overview_tab, cohorts_tab, quality_tab = st.tabs(["Overview", "Cohorts", "Quality"])
 
-    kpi_values = _compute_kpis(ts_df)
-    gmv_30d = kpi_values["gmv_30d"]
-    orders_30d = kpi_values["orders_30d"]
-    gmv_90d = kpi_values["gmv_90d"]
-    orders_90d = kpi_values["orders_90d"]
-    range_30d = kpi_values["range_30d"]
-    range_90d = kpi_values["range_90d"]
+    with overview_tab:
+        order_where_clause, order_where_params = _build_order_where_clause(filters)
+        ts_sql = f"""
+        SELECT
+          o.order_date AS metric_date,
+          ROUND(SUM(o.order_amount_from_items), 2) AS gmv,
+          COUNT(*) AS orders
+        FROM fct_orders o
+        JOIN dim_customers c ON o.customer_id = c.customer_id
+        WHERE {order_where_clause}
+        GROUP BY 1
+        ORDER BY 1;
+        """
+        ts_df = _run_query(args.db, ts_sql, order_where_params)
+        if not ts_df.empty:
+            ts_df["metric_date"] = pd.to_datetime(ts_df["metric_date"])
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("GMV (30d)", f"{gmv_30d:,.2f}")
-    col2.metric("Orders (30d)", f"{orders_30d:,}")
-    col3.metric("GMV (90d)", f"{gmv_90d:,.2f}")
-    col4.metric("AOV (90d)", f"{(gmv_90d / orders_90d) if orders_90d else 0:,.2f}")
-    st.caption("Paid orders only")
-    st.caption(f"30d window: {range_30d}")
-    st.caption(f"90d window: {range_90d}")
+        net_where_clause, net_where_params = _build_net_order_where_clause(filters)
+        net_sql = f"""
+        SELECT
+          o.order_date AS metric_date,
+          ROUND(
+            SUM(
+              CASE
+                WHEN o.order_status = 'paid' THEN o.order_amount_from_items
+                WHEN o.order_status = 'refunded' THEN -o.order_amount_from_items
+                ELSE 0
+              END
+            ),
+            2
+          ) AS net_gmv
+        FROM fct_orders o
+        JOIN dim_customers c ON o.customer_id = c.customer_id
+        WHERE {net_where_clause}
+        GROUP BY 1
+        ORDER BY 1;
+        """
+        net_df = _run_query(args.db, net_sql, net_where_params)
+        if not net_df.empty:
+            net_df["metric_date"] = pd.to_datetime(net_df["metric_date"])
 
-    gmv_chart_df = _build_chart_df(ts_df, "gmv", "gmv_ma7")
-    orders_chart_df = _build_chart_df(ts_df, "orders", "orders_ma7")
+        kpi_values = _compute_kpis(ts_df)
+        gmv_30d = kpi_values["gmv_30d"]
+        orders_30d = kpi_values["orders_30d"]
+        gmv_90d = kpi_values["gmv_90d"]
+        orders_90d = kpi_values["orders_90d"]
+        range_30d = kpi_values["range_30d"]
+        range_90d = kpi_values["range_90d"]
+        net_gmv_30d = _compute_net_gmv_30d(net_df)
 
-    left, right = st.columns(2)
-    left.subheader("Daily GMV")
-    if gmv_chart_df.empty:
-        left.info("No data for selected filters.")
-    else:
-        left.line_chart(gmv_chart_df)
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("GMV (30d)", f"{gmv_30d:,.2f}")
+        col2.metric("Orders (30d)", f"{orders_30d:,}")
+        col3.metric("GMV (90d)", f"{gmv_90d:,.2f}")
+        col4.metric("AOV (90d)", f"{(gmv_90d / orders_90d) if orders_90d else 0:,.2f}")
+        col5.metric("Net GMV (30d)", f"{net_gmv_30d:,.2f}")
+        st.caption("Paid orders only")
+        st.caption(f"30d window: {range_30d}")
+        st.caption(f"90d window: {range_90d}")
 
-    right.subheader("Daily Orders")
-    if orders_chart_df.empty:
-        right.info("No data for selected filters.")
-    else:
-        right.line_chart(orders_chart_df)
+        gmv_chart_df = _build_chart_df(ts_df, "gmv", "gmv_ma7")
+        orders_chart_df = _build_chart_df(ts_df, "orders", "orders_ma7")
 
-    top_categories_where_clause, top_categories_params = _build_top_category_where_clause(filters)
-    top_categories_sql = f"""
-    SELECT
-      p.category,
-      ROUND(SUM(oi.item_total), 2) AS gmv
-    FROM fct_order_items oi
-    JOIN fct_orders o ON oi.order_id = o.order_id
-    JOIN dim_products p ON oi.product_id = p.product_id
-    JOIN dim_customers c ON o.customer_id = c.customer_id
-    WHERE {top_categories_where_clause}
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT 10;
-    """
-    cat_df = _run_query(args.db, top_categories_sql, top_categories_params)
-    st.subheader("Top Categories by GMV")
-    if cat_df.empty:
-        st.info("No category data for selected filters.")
-    else:
-        st.bar_chart(cat_df.set_index("category")["gmv"])
+        left, right = st.columns(2)
+        left.subheader("Daily GMV")
+        if gmv_chart_df.empty:
+            left.info("No data for selected filters.")
+        else:
+            left.line_chart(gmv_chart_df)
 
-    retention_sql = """
+        right.subheader("Daily Orders")
+        if orders_chart_df.empty:
+            right.info("No data for selected filters.")
+        else:
+            right.line_chart(orders_chart_df)
+
+        top_categories_where_clause, top_categories_params = _build_top_category_where_clause(filters)
+        top_categories_sql = f"""
+        SELECT
+          p.category,
+          ROUND(SUM(oi.item_total), 2) AS gmv
+        FROM fct_order_items oi
+        JOIN fct_orders o ON oi.order_id = o.order_id
+        JOIN dim_products p ON oi.product_id = p.product_id
+        JOIN dim_customers c ON o.customer_id = c.customer_id
+        WHERE {top_categories_where_clause}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT 10;
+        """
+        cat_df = _run_query(args.db, top_categories_sql, top_categories_params)
+        st.subheader("Top Categories by GMV")
+        if cat_df.empty:
+            st.info("No category data for selected filters.")
+        else:
+            st.bar_chart(cat_df.set_index("category")["gmv"])
+
+    with cohorts_tab:
+        retention_sql = """
     WITH paid_orders AS (
       SELECT customer_id, DATE_TRUNC('month', order_date) AS order_month
       FROM fct_orders
@@ -408,40 +478,44 @@ def main() -> None:
     JOIN cohort_size cs USING (cohort_month)
     GROUP BY 1, 2, 4
     ORDER BY 1, 2;
-    """
-    retention_df = _run_query(args.db, retention_sql)
-    if not retention_df.empty:
-        st.subheader("Cohort Retention")
-        st.dataframe(_build_retention_display(retention_df), use_container_width=True)
+        """
+        retention_df = _run_query(args.db, retention_sql)
+        if not retention_df.empty:
+            st.subheader("Cohort Retention")
+            st.dataframe(_build_retention_display(retention_df), use_container_width=True)
+        else:
+            st.info("No cohort data available.")
 
-    quality_report = _load_quality_report(str(quality_report_path))
-    if not quality_report:
+    with quality_tab:
+        quality_report = _load_quality_report(str(quality_report_path))
+        st.caption(f"Artifacts path: {quality_report_path}")
+        if not quality_report:
+            st.subheader("Data Quality Status")
+            st.info(
+                "Quality report bulunamadı. Lütfen `make demo` veya "
+                "`opdata quality --db data/warehouse.duckdb --out artifacts/quality --config config.example.yml` çalıştırın."
+            )
+            return
+
+        summary = quality_report.get("summary", {})
+        last_run = quality_report.get("generated_at") or quality_report.get("timestamp") or "N/A"
+
         st.subheader("Data Quality Status")
-        st.info(
-            "Quality report bulunamadı. Lütfen `make demo` veya "
-            "`opdata quality --db data/warehouse.duckdb --out artifacts/quality --config config.example.yml` çalıştırın."
-        )
-        return
+        q1, q2, q3 = st.columns(3)
+        q1.metric("PASS", summary.get("pass", 0))
+        q2.metric("WARN", summary.get("warn", 0))
+        q3.metric("FAIL", summary.get("fail", 0))
+        st.caption(f"Last run: {last_run}")
 
-    summary = quality_report.get("summary", {})
-    last_run = quality_report.get("generated_at") or quality_report.get("timestamp") or "N/A"
-
-    st.subheader("Data Quality Status")
-    q1, q2, q3 = st.columns(3)
-    q1.metric("PASS", summary.get("pass", 0))
-    q2.metric("WARN", summary.get("warn", 0))
-    q3.metric("FAIL", summary.get("fail", 0))
-    st.caption(f"Last run: {last_run}")
-
-    failed_df, warn_df = _extract_dq_table_rows(quality_report.get("checks", []))
-    if not failed_df.empty:
-        st.write("Failed checks")
-        st.dataframe(failed_df.head(20), use_container_width=True)
-    else:
-        st.success("No failed checks.")
-        if not warn_df.empty:
-            st.write("Warn checks")
-            st.dataframe(warn_df.head(20), use_container_width=True)
+        failed_df, warn_df = _extract_dq_table_rows(quality_report.get("checks", []))
+        if not failed_df.empty:
+            st.write("Failed checks")
+            st.dataframe(failed_df.head(20), use_container_width=True)
+        else:
+            st.success("No failed checks.")
+            if not warn_df.empty:
+                st.write("Warn checks")
+                st.dataframe(warn_df.head(20), use_container_width=True)
 
 
 if __name__ == "__main__":
