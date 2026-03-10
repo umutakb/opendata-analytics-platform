@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-03-10
+### Added
+- Multi-source ingest via `opdata ingest` with offline-first synthetic default
+- Optional open dataset ingest (`uci_online_retail`) with automatic synthetic fallback on failure
+- Plugin-like auto-discovery for metrics (`sql/metrics/*.sql`) with `enabled`/`disabled` config controls
+- Plugin-like auto-discovery for quality checks under `src/opendata_platform/quality/checks/`
+- Multi-page dashboard layout (Overview, Cohorts, Quality)
+- Data contract validation command: `opdata validate-contract`
+- Schema contract file: `contracts/schema_v1.yml` and `schema_version: 1` config support
+- `run-all` support for `--source` and optional `--validate-contract`
+
 ## [1.2.0] - 2026-03-09
 ### Added
 - `opdata run-all` command for end-to-end execution

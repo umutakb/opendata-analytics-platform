@@ -1,40 +1,50 @@
 # OpenData Analytics Platform
 
-A clean, local-first analytics platform that implements a mini modern data stack for e-commerce data:
+Local-first, DuckDB tabanlı mini modern data stack örneği.
 
-- Ingestion (deterministic synthetic data)
+- Ingestion (synthetic + optional open dataset)
 - Warehouse (DuckDB)
 - SQL transforms (staging + marts)
-- Metrics layer (SQL-driven exports)
-- Data quality checks (JSON + HTML report)
-- Streamlit dashboard
-- CI with pytest
+- Metrics layer (SQL auto-discovery)
+- Data quality checks (plugin discovery)
+- Streamlit dashboard (multi-page)
+- Data contracts (schema validation)
+- CI (pytest)
 
 ## Architecture
 
 ```text
-+---------------------+      +------------------------+      +------------------------+
-| Synthetic Generator | ---> | DuckDB Raw Tables      | ---> | SQL Staging Models     |
-| (CSV in data/raw)   |      | customers/products/... |      | stg_* views            |
-+---------------------+      +------------------------+      +------------------------+
-                                                                  |
-                                                                  v
-                                   +------------------------+      +------------------------+
-                                   | SQL Mart Models        | ---> | Metrics SQL            |
-                                   | dim_*/fct_* tables     |      | CSV + JSON artifacts   |
-                                   +------------------------+      +------------------------+
-                                                |
-                                                v
-                                   +------------------------+      +------------------------+
-                                   | Data Quality Checks    | ---> | Streamlit Dashboard    |
-                                   | report.json / report.html     | KPIs, trends, cohorts |
-                                   +------------------------+      +------------------------+
-                                                |
-                                                v
-                                       +----------------+
-                                       | GitHub Actions |
-                                       | pytest -q      |
-                                       +----------------+
++----------------------------+
+| opdata ingest              |
+| - source=synthetic (default)|
+| - source=open (optional)   |
++-------------+--------------+
+              |
+              v
++----------------------------+      +-----------------------------+
+| data/raw/*.csv             | ---> | opdata build-warehouse      |
++----------------------------+      | DuckDB (data/warehouse.duckdb)
+                                    +---------------+-------------+
+                                                    |
+                                                    v
+                                    +-----------------------------+
+                                    | opdata transform            |
+                                    | sql/staging + sql/marts     |
+                                    +---------------+-------------+
+                                                    |
+                          +-------------------------+-------------------------+
+                          v                                                   v
+            +-----------------------------+                     +-----------------------------+
+            | opdata metrics              |                     | opdata quality              |
+            | sql/metrics/*.sql           |                     | quality/checks/* plugins    |
+            | artifacts/runs/<ts>/metrics |                     | artifacts/runs/<ts>/quality |
+            +-----------------------------+                     +-----------------------------+
+                          \                                                   /
+                           \                                                 /
+                            v                                               v
+                           +-----------------------------------------------+
+                           | Streamlit Dashboard (Overview/Cohorts/Quality)|
+                           +-----------------------------------------------+
 ```
 
 ## Quickstart
@@ -43,26 +53,61 @@ A clean, local-first analytics platform that implements a mini modern data stack
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .[dev]
-make demo
-make dashboard
+opdata run-all --small
+opdata dashboard --db data/warehouse.duckdb --run
 ```
 
-## CLI Commands
+## Core Commands
 
 ```bash
-opdata demo-data --out data/raw --seed 42 --days 365
+opdata ingest --source synthetic --out data/raw --days 365 --seed 42
+opdata ingest --source open --out data/raw --dataset uci_online_retail
 opdata build-warehouse --raw data/raw --db data/warehouse.duckdb
 opdata transform --db data/warehouse.duckdb
-opdata metrics --db data/warehouse.duckdb --out artifacts/metrics
-opdata quality --db data/warehouse.duckdb --out artifacts/quality --config config.example.yml
-opdata dashboard --db data/warehouse.duckdb
+opdata metrics --db data/warehouse.duckdb --config config.example.yml
+opdata quality --db data/warehouse.duckdb --config config.example.yml
+opdata validate-contract --db data/warehouse.duckdb --contract contracts/schema_v1.yml
+opdata run-all --small
 ```
 
-`opdata dashboard` prints the Streamlit command. Use `opdata dashboard --db data/warehouse.duckdb --run` to launch directly.
+Not: `--source open` internet gerektirir. İndirme/parsing başarısız olursa ingest otomatik olarak synthetic veriye fallback yapar.
 
-## Metrics Selection (Config-Driven)
+## run-all
 
-You can control which metrics are executed by editing `config.example.yml`:
+`opdata run-all` adımları sırayla çalıştırır:
+
+1. ingest
+2. build-warehouse
+3. transform
+4. metrics
+5. quality
+6. (opsiyonel) validate-contract
+
+Örnek:
+
+```bash
+opdata run-all --small
+opdata run-all --source open --dataset uci_online_retail --validate-contract
+```
+
+Her çalıştırma için timestamp’li çıktı üretilir:
+
+- `artifacts/runs/<YYYY-MM-DD_HHMMSS>/metrics`
+- `artifacts/runs/<YYYY-MM-DD_HHMMSS>/quality`
+- `artifacts/runs/<YYYY-MM-DD_HHMMSS>/logs/run.log`
+- `artifacts/runs/<YYYY-MM-DD_HHMMSS>/run_manifest.json`
+- `artifacts/latest_run.txt`
+
+## Config
+
+`config.example.yml` içinde:
+
+- `schema_version: 1`
+- `warehouse.db_path`
+- quality kuralları
+- metrics seçimi
+
+Örnek metrics seçimi:
 
 ```yaml
 metrics:
@@ -78,90 +123,92 @@ metrics:
     - m_net_gmv_daily
 ```
 
-- If `metrics.enabled` is present, only listed metrics run.
-- `metrics.disabled` always applies as blacklist.
-- If `metrics.enabled` is missing or empty, all discovered `sql/metrics/*.sql` files run except disabled ones.
+Davranış:
+
+- `enabled` varsa yalnızca listedekiler çalışır.
+- `disabled` her zaman blacklist olarak uygulanır.
+- `enabled` yoksa `sql/metrics/*.sql` altındaki tüm metric SQL’leri (disabled hariç) çalışır.
+
+## Dashboard (Multi-page)
+
+`opdata dashboard --db data/warehouse.duckdb --run`
+
+Sekmeler:
+
+- `Overview`: KPI, GMV/Orders trendleri (MA7), Top Categories, Net GMV
+- `Cohorts`: retention cohort tablosu
+- `Quality`: PASS/WARN/FAIL özeti, failed checks, son çalıştırma bilgisi
+
+## Data Contracts
+
+Contract dosyası: `contracts/schema_v1.yml`
+
+Doğrulananlar:
+
+- required relation exists
+- required column exists
+- (varsa) basic type checks
+
+Çalıştırma:
+
+```bash
+opdata validate-contract --db data/warehouse.duckdb --contract contracts/schema_v1.yml
+```
+
+## Test ve CI
+
+```bash
+pytest -q
+```
+
+CI (`.github/workflows/ci.yml`) testleri çalıştırır.
+
+## Make Targets
+
+```bash
+make install
+make demo
+make run-all
+make dashboard
+make test
+```
 
 ## Folder Structure
 
 ```text
 opendata-analytics-platform/
-  README.md
-  LICENSE
-  Makefile
-  pyproject.toml
-  config.example.yml
-  src/opendata_platform/
-    __init__.py
-    config.py
-    cli.py
-    ingest/
-      generate_data.py
-      download_open_data.py
-    warehouse/
-      build_db.py
-    transform/
-      run_sql.py
-    quality/
-      dq_checks.py
-      report.py
-    metrics/
-      metric_runner.py
-    dashboard/
-      app.py
+  contracts/
+    schema_v1.yml
   sql/
     staging/
     marts/
     metrics/
-  tests/
-  .github/workflows/ci.yml
-  data/
-    raw/
-    staging/
-    marts/
-  artifacts/
-    quality/
+  src/opendata_platform/
+    cli.py
+    ingest/
+    warehouse/
+    transform/
     metrics/
-    logs/
+    quality/
+      checks/
+    contracts/
+    dashboard/
+  tests/
+  artifacts/
+  data/
 ```
 
-## Outputs
+## Breaking Changes Policy
 
-Running `make demo` generates:
+- `schema_version` artırımı potansiyel breaking change olarak değerlendirilir.
+- Yeni major sürümlerde contract ve metric adlarında uyumsuz değişiklikler olabilir.
+- Minor sürümler geriye uyumluluğu korumayı hedefler.
 
-- `data/raw/*.csv`
-- `data/staging/*.csv`
-- `data/marts/*.csv`
-- `artifacts/metrics/*.csv` and `*.json`
-- `artifacts/quality/report.json`
-- `artifacts/quality/report.html`
+## Screenshots (Placeholders)
 
-## Add a New Metric
-
-1. Add a SQL file under `sql/metrics/` (example: `m_new_metric.sql`).
-2. Ensure the SQL returns a result table.
-3. Run `opdata metrics --db data/warehouse.duckdb --out artifacts/metrics`.
-4. The runner auto-exports `m_new_metric.csv` and `m_new_metric.json`.
-
-## Add a New Quality Check
-
-1. Add rule configuration to `config.example.yml` if needed.
-2. Implement check logic in `src/opendata_platform/quality/dq_checks.py`.
-3. Include it in `run_quality_checks`.
-4. Re-run: `opdata quality --db data/warehouse.duckdb --out artifacts/quality --config config.example.yml`.
-
-## Optional Open Dataset Download
-
-Core pipeline works fully offline with synthetic data. If internet is available, you can optionally fetch an open dataset:
-
-```bash
-python -m opendata_platform.ingest.download_open_data --out data/raw_open
-```
-
-## Screenshot Placeholders
-
-- `docs/screenshots
-
+- `docs/screenshots/overview.png`
+- `docs/screenshots/cohorts.png`
+- `docs/screenshots/quality.png`
 
 ## License
 
